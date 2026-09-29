@@ -1,0 +1,14 @@
+[Unit]
+Description=wgbot - Telegram bot for WireGuard management
+After=network-online.target victoriametrics.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/wgbot/wgbot.env
+ExecStart=/usr/local/bin/wgbot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

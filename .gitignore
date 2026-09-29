@@ -1,0 +1,10 @@
+# local reference checkout of the upstream installer, not part of this repo
+/wireguard-install/
+
+# build artifacts
+/wgbot/wgbot
+/wgbot/wgbot-*
+*.wgbot.tmp
+
+# OS
+.DS_Store
