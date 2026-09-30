@@ -49,8 +49,23 @@ bash wgbot-install.sh
 4. Собирает **wgbot** (Go; при необходимости ставит golang из репозитория ОС).
 5. Пишет `/etc/wgbot/wgbot.env` (chmod 600) и systemd-юниты, запускает всё.
 
-Повторный запуск — меню: перенастройка, перезапуск, пересборка, удаление
-(WireGuard при удалении не затрагивается).
+Повторный запуск — меню:
+
+```
+1) Update from GitHub (sources, wgbot binary, systemd units)  — обновление
+2) Reconfigure (token, admins, summary time, VM settings)
+3) Restart wgbot
+4) Rebuild wgbot from local sources and restart
+5) Remove wgbot and VictoriaMetrics (WireGuard is NOT touched)
+6) Exit
+```
+
+Обновление (пункт 1): забирает свежие исходники из GitHub в `/opt/wire_bot`
+(git pull, либо clone, если установка была из tar-архива), пересобирает
+бинарник, обновляет systemd-юниты (с сохранением порта/retention VM) и
+рестартует только wgbot — **WireGuard не затрагивается**. Дополнительно
+спрашивает, обновить ли VictoriaMetrics до последнего релиза (данные
+в `/var/lib/victoria-metrics` сохраняются).
 
 ## Архитектура
 

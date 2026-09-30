@@ -13,8 +13,12 @@ if readlink /proc/$$/exe | grep -q "dash"; then
 	exit
 fi
 
-# Discard stdin. Needed when running from a one-liner which includes a newline
-read -N 999999 -t 0.001
+# Discard stdin. Needed when running from a one-liner which includes a newline.
+# Only when stdin is a terminal (with piped stdin this read would spin forever
+# consuming 100% CPU, e.g. `echo 1 | bash wgbot-install.sh`).
+if [[ -t 0 ]]; then
+	read -N 999999 -t 0.001
+fi
 
 # Detect OS
 if grep -qs "ubuntu" /etc/os-release; then
@@ -107,6 +111,58 @@ build_wgbot () {
 	fi
 }
 
+# update_sources fetches the latest wgbot sources from GitHub into
+# /opt/wire_bot (first run: clone; subsequent runs: pull).
+update_sources () {
+	repo_url="https://github.com/shmelevall/wire_bot.git"
+	src_dir="/opt/wire_bot"
+	if [[ -d "$src_dir/.git" ]]; then
+		echo "Updating sources in $src_dir..."
+		if ! git -C "$src_dir" pull --ff-only; then
+			echo "git pull failed. Fix the repository state in $src_dir and re-run."
+			exit
+		fi
+	else
+		# /opt/wire_bot exists but is not a git checkout (e.g. deployed from
+		# a tarball): fetch the repo separately and rsync/copy it over.
+		echo "Sources in $src_dir are not a git checkout, fetching fresh from GitHub..."
+		if ! hash git 2>/dev/null; then
+			echo "Installing git..."
+			if [[ "$os" == "ubuntu" || "$os" == "debian" ]]; then
+				apt-get update
+				apt-get install -y git
+			else
+				dnf install -y git
+			fi
+		fi
+		tmp_clone=$(mktemp -d)
+		if ! git clone --quiet "$repo_url" "$tmp_clone/wire_bot"; then
+			echo "git clone failed."
+			rm -rf "$tmp_clone"
+			exit
+		fi
+		rm -rf "$src_dir"
+		mv "$tmp_clone/wire_bot" "$src_dir"
+		rm -rf "$tmp_clone"
+	fi
+	# Point the script's source dir at the updated checkout so that
+	# build_wgbot and unit templates come from the fresh sources.
+	script_dir="$src_dir"
+}
+
+# update_units refreshes the systemd units from the current sources,
+# preserving the configured VM port and retention.
+update_units () {
+	vm_port_cur=$(grep -oE 'WGBOT_VM_URL=http://127.0.0.1:[0-9]+' /etc/wgbot/wgbot.env 2>/dev/null | grep -oE '[0-9]+$')
+	vm_retention_cur=$(grep -oE 'retentionPeriod=[^ "]+' /etc/systemd/system/victoriametrics.service 2>/dev/null | cut -d '=' -f 2)
+	[[ -z "$vm_port_cur" ]] && vm_port_cur="8428"
+	[[ -z "$vm_retention_cur" ]] && vm_retention_cur="90d"
+	sed -e "s/__VMPORT__/$vm_port_cur/" -e "s/__RETENTION__/$vm_retention_cur/" \
+		"$script_dir/wgbot/deploy/victoriametrics.service" > /etc/systemd/system/victoriametrics.service
+	cp "$script_dir/wgbot/deploy/wgbot.service" /etc/systemd/system/wgbot.service
+	systemctl daemon-reload
+}
+
 configure_wgbot () {
 	echo
 	echo "wgbot configuration"
@@ -167,18 +223,64 @@ else
 	echo "wgbot is already installed."
 	echo
 	echo "Select an option:"
-	echo "   1) Reconfigure (token, admins, summary time, VM settings)"
-	echo "   2) Restart wgbot"
-	echo "   3) Rebuild wgbot from sources and restart"
-	echo "   4) Remove wgbot and VictoriaMetrics (WireGuard is NOT touched)"
-	echo "   5) Exit"
+	echo "   1) Update from GitHub (sources, wgbot binary, systemd units)"
+	echo "   2) Reconfigure (token, admins, summary time, VM settings)"
+	echo "   3) Restart wgbot"
+	echo "   4) Rebuild wgbot from local sources and restart"
+	echo "   5) Remove wgbot and VictoriaMetrics (WireGuard is NOT touched)"
+	echo "   6) Exit"
 	read -p "Option: " option
-	until [[ "$option" =~ ^[1-5]$ ]]; do
+	until [[ "$option" =~ ^[1-6]$ ]]; do
 		echo "$option: invalid selection."
 		read -p "Option: " option
 	done
 	case "$option" in
 		1)
+			update_sources
+			update_units
+			build_wgbot
+			systemctl restart wgbot.service
+			echo
+			read -p "Also update VictoriaMetrics to the latest release? [y/N]: " vm_update
+			until [[ "$vm_update" =~ ^[yYnN]*$ ]]; do
+				echo "$vm_update: invalid selection."
+				read -p "Also update VictoriaMetrics to the latest release? [y/N]: " vm_update
+			done
+			if [[ "$vm_update" =~ ^[yY]$ ]]; then
+				# Keep the data directory and settings; just replace the binary.
+				arch=$(uname -m)
+				case "$arch" in
+					x86_64) vm_arch="amd64" ;;
+					aarch64|arm64) vm_arch="arm64" ;;
+					*)
+						echo "Unsupported architecture: $arch"
+						exit
+					;;
+				esac
+				vm_latest=$(wget -qO- -T 10 -t 1 "https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/latest" 2>/dev/null || curl -m 15 -sL "https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/latest")
+				vm_version=$(grep -m 1 -oE '"tag_name": *"[^"]+"' <<< "$vm_latest" | cut -d '"' -f 4)
+				vm_current=$(/usr/local/bin/victoria-metrics --version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+				if [[ -z "$vm_version" ]]; then
+					echo "Could not detect the latest VictoriaMetrics release, skipping."
+				elif [[ "$vm_current" == *"$vm_version"* ]]; then
+					echo "VictoriaMetrics $vm_version is already up to date."
+				else
+					echo "Updating VictoriaMetrics: $vm_current -> $vm_version..."
+					vm_url="https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/${vm_version}/victoria-metrics-linux-${vm_arch}-${vm_version}.tar.gz"
+					{ wget -qO- "$vm_url" 2>/dev/null || curl -sL "$vm_url" ; } | tar xz -C /usr/local/bin/ victoria-metrics-prod
+					if [[ -e /usr/local/bin/victoria-metrics-prod ]]; then
+						mv -f /usr/local/bin/victoria-metrics-prod /usr/local/bin/victoria-metrics
+						systemctl restart victoriametrics.service
+					else
+						echo "VictoriaMetrics download failed, keeping the current version."
+					fi
+				fi
+			fi
+			echo
+			echo "Update finished."
+			echo "wgbot: $(/usr/local/bin/wgbot 2>&1 | head -1 >/dev/null; systemctl is-active wgbot.service) ($(cd /opt/wire_bot && git log --oneline -1 2>/dev/null | cut -c1-7))"
+		;;
+		2)
 			# derive current VM settings as defaults, then re-ask everything
 			vm_port=$(grep -oE 'WGBOT_VM_URL=http://127.0.0.1:[0-9]+' /etc/wgbot/wgbot.env | grep -oE '[0-9]+$')
 			vm_retention=$(grep -oE 'retentionPeriod=[^ "]+' /etc/systemd/system/victoriametrics.service 2>/dev/null | cut -d '=' -f 2)
@@ -187,24 +289,21 @@ else
 			token=""
 			admin_ids=""
 			configure_wgbot
-			# regenerate the VM unit in case port/retention changed
-			sed -e "s/__VMPORT__/$vm_port/" -e "s/__RETENTION__/$vm_retention/" \
-				"$script_dir/wgbot/deploy/victoriametrics.service" > /etc/systemd/system/victoriametrics.service
-			systemctl daemon-reload
+			update_units
 			systemctl restart victoriametrics.service
 			systemctl restart wgbot.service
 			echo "Reconfigured and restarted."
 		;;
-		2)
+		3)
 			systemctl restart wgbot.service
 			echo "wgbot restarted."
 		;;
-		3)
+		4)
 			build_wgbot
 			systemctl restart wgbot.service
 			echo "wgbot rebuilt and restarted."
 		;;
-		4)
+		5)
 			read -p "Confirm removal of wgbot and VictoriaMetrics? [y/N]: " remove
 			until [[ "$remove" =~ ^[yYnN]*$ ]]; do
 				echo "$remove: invalid selection."
@@ -221,7 +320,7 @@ else
 				echo "Removal aborted!"
 			fi
 		;;
-		5)
+		6)
 			exit
 		;;
 	esac
