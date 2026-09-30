@@ -135,13 +135,17 @@ func (b *Bot) clearState(userID int64) {
 
 func (b *Bot) handle(ctx context.Context, api *tbot.Bot, update *models.Update) {
 	if update.Message != nil && update.Message.From != nil {
+		log.Printf("[fsm] message from=%d chat=%d text=%q",
+			update.Message.From.ID, update.Message.Chat.ID, update.Message.Text)
 		if !b.isAdmin(update.Message.From.ID) {
+			log.Printf("[fsm] user %d is not an admin, ignored", update.Message.From.ID)
 			return
 		}
 		b.onMessage(ctx, update.Message)
 		return
 	}
 	if update.CallbackQuery != nil {
+		log.Printf("[fsm] callback from=%d data=%q", update.CallbackQuery.From.ID, update.CallbackQuery.Data)
 		if !b.isAdmin(update.CallbackQuery.From.ID) {
 			return
 		}
@@ -185,6 +189,7 @@ func (b *Bot) onMessage(ctx context.Context, msg *models.Message) {
 }
 
 func (b *Bot) onStateInput(ctx context.Context, chatID, userID int64, st *userState, text string) {
+	log.Printf("[fsm] state input user=%d step=%s name=%q text=%q", userID, st.step, st.name, text)
 	switch st.step {
 	case "name":
 		if err := client.ValidName(text); err != nil {

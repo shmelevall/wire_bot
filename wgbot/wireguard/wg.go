@@ -2,7 +2,6 @@ package wireguard
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -70,24 +69,17 @@ func Dump(iface string) ([]PeerStat, error) {
 
 // AddConf applies a peer config snippet to a running interface without
 // restarting it (same as the reference script's `wg addconf` step).
+// The snippet is piped through /dev/stdin: no temp files, no permission
+// issues regardless of how wgbot is launched (the wg binary opens the
+// file itself, so /tmp can be inaccessible to it).
 func AddConf(iface, snippet string) error {
-	tmp, err := os.CreateTemp("", "wgbot-addconf-*.conf")
+	cmd := exec.Command("wg", "addconf", iface, "/dev/stdin")
+	cmd.Stdin = strings.NewReader(snippet)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return err
+		return fmt.Errorf("wg addconf %s: %s", iface, strings.TrimSpace(string(out)))
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.WriteString(snippet); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp.Name(), 0600); err != nil {
-		return err
-	}
-	_, err = runWG("addconf", iface, tmp.Name())
-	return err
+	return nil
 }
 
 // RemovePeer removes a peer from the live interface without touching others.
