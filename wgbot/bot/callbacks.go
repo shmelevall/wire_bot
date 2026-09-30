@@ -129,7 +129,7 @@ func (b *Bot) onDNSCallback(ctx context.Context, chatID int64, cb *models.Callba
 	}
 	if choice == "8" {
 		st.step = "custom_dns"
-		b.send(ctx, chatID, "Введите DNS-серверы (IPv4, через запятую или пробел):")
+		b.ask(ctx, chatID, "Введите DNS-серверы (IPv4, через запятую или пробел):")
 		return
 	}
 	idx := 0

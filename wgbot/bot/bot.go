@@ -105,6 +105,23 @@ func (b *Bot) sendWithKeyboard(ctx context.Context, chatID int64, text string, k
 	}
 }
 
+// ask sends a prompt that forces a text reply. In group chats bots run in
+// privacy mode and only receive commands and replies to their own messages,
+// so force_reply is required for the dialog to work there.
+func (b *Bot) ask(ctx context.Context, chatID int64, text string) {
+	_, err := b.api.SendMessage(ctx, &tbot.SendMessageParams{
+		ChatID: chatID,
+		Text:   text,
+		ReplyMarkup: models.ForceReply{
+			ForceReply:            true,
+			InputFieldPlaceholder: "введите ответ",
+		},
+	})
+	if err != nil {
+		log.Printf("[bot] send: %v", err)
+	}
+}
+
 func inlineKB(rows ...[]models.InlineKeyboardButton) models.InlineKeyboardMarkup {
 	return models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
@@ -171,7 +188,7 @@ func (b *Bot) onMessage(ctx context.Context, msg *models.Message) {
 		b.send(ctx, chatID, helpText)
 	case text == "/add":
 		b.setState(userID, &userState{step: "name"})
-		b.send(ctx, chatID, "Введите имя нового клиента (латиница, цифры, «-», «_», до 15 символов):")
+		b.ask(ctx, chatID, "Введите имя нового клиента (латиница, цифры, «-», «_», до 15 символов):")
 	case text == "/list":
 		b.sendList(ctx, chatID)
 	case text == "/stats":
@@ -193,7 +210,7 @@ func (b *Bot) onStateInput(ctx context.Context, chatID, userID int64, st *userSt
 	switch st.step {
 	case "name":
 		if err := client.ValidName(text); err != nil {
-			b.send(ctx, chatID, err.Error()+"\nПопробуйте ещё раз:")
+			b.ask(ctx, chatID, err.Error()+"\nПопробуйте ещё раз:")
 			return
 		}
 		if _, err := b.mgr.List(); err != nil {
@@ -207,7 +224,7 @@ func (b *Bot) onStateInput(ctx context.Context, chatID, userID int64, st *userSt
 	case "custom_dns":
 		dns := parseCustomDNS(text)
 		if dns == "" {
-			b.send(ctx, chatID, "Некорректный ввод. Введите один или несколько IPv4-адресов через запятую:")
+			b.ask(ctx, chatID, "Некорректный ввод. Введите один или несколько IPv4-адресов через запятую:")
 			return
 		}
 		b.createClient(ctx, chatID, userID, st.name, dns)
